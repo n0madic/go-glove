@@ -1,0 +1,6 @@
+*.txt
+*.gob
+*.bin
+evaluate/evaluate
+train/train
+CLAUDE.md
