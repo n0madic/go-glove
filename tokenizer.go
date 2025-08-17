@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode"
+	"unicode/utf8"
 )
 
 type WordFreq struct {
@@ -14,8 +14,64 @@ type WordFreq struct {
 	Freq int
 }
 
-// StanfordTokenize implements tokenization in the style of Stanford PTBTokenizer
-func StanfordTokenize(reader io.Reader, minFreq int) []WordFreq {
+// TokenizerOptions configures the tokenization behavior
+type TokenizerOptions struct {
+	Lowercase       bool
+	DigitsToZero    bool
+	ReplaceURLs     bool
+	ReplaceEmails   bool
+	KeepHyphens     bool
+	SentencePerLine bool
+}
+
+// DefaultGloVeOptions returns tokenization options optimized for GloVe training
+func DefaultGloVeOptions() TokenizerOptions {
+	return TokenizerOptions{
+		Lowercase:       true,  // For compact vocabulary
+		DigitsToZero:    true,  // Normalize digits to 0
+		ReplaceURLs:     true,  // Replace URLs with <url>
+		ReplaceEmails:   true,  // Replace emails with <email>
+		KeepHyphens:     true,  // Preserve hyphenated words
+		SentencePerLine: false, // Stream tokens continuously
+	}
+}
+
+var (
+	// URLs / emails
+	reURL   = regexp.MustCompile(`(?i)\b(?:https?|ftp)://[^\s]+`)
+	reEmail = regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
+
+	// Ellipsis (3+ dots) -> " ... "
+	reEllipsis = regexp.MustCompile(`\.{3,}`)
+
+	// Normalize spacings around selected ASCII punctuation (except dot/comma which need care)
+	rePunctSpace = regexp.MustCompile(`([;:!?(){}\[\]"])`)
+
+	// Contractions (special PTB-ish cases first)
+	reWonT   = regexp.MustCompile(`\b(?i)won't\b`)
+	reCanT   = regexp.MustCompile(`\b(?i)can't\b`)
+	reShanT  = regexp.MustCompile(`\b(?i)shan't\b`)
+	reNt     = regexp.MustCompile(`\b([A-Za-z]+)n't\b`)
+	reAposRe = regexp.MustCompile(`\b([A-Za-z]+)'(re|ve|ll|d|m|s)\b`)
+
+	// After spacing commas/dots, re-join numeric patterns: 1 , 234  -> 1,234 ;  3 . 14 -> 3.14
+	reNumCommaFix = regexp.MustCompile(`(\d)\s*,\s*(\d)`)
+	reNumDotFix   = regexp.MustCompile(`(\d)\s*\.\s*(\d)`)
+
+	// Space terminal sentence punctuation . ! ?  (but we will later re-join decimals)
+	reTermPunct = regexp.MustCompile(`([^.0-9A-Za-z])([.!?])|([A-Za-z0-9])([.!?])(\s|$)`)
+
+	// Space double dash as a separate token
+	reDoubleDash = regexp.MustCompile(`--`)
+)
+
+// Tokenize implements tokenization optimized for GloVe training
+func Tokenize(reader io.Reader, minFreq int) []WordFreq {
+	return TokenizeWithOptions(reader, minFreq, DefaultGloVeOptions())
+}
+
+// TokenizeWithOptions provides configurable tokenization
+func TokenizeWithOptions(reader io.Reader, minFreq int, options TokenizerOptions) []WordFreq {
 	if minFreq <= 0 {
 		minFreq = 5
 	}
@@ -23,11 +79,26 @@ func StanfordTokenize(reader io.Reader, minFreq int) []WordFreq {
 	scanner := bufio.NewScanner(reader)
 	scanner.Split(bufio.ScanLines)
 
+	// Increase buffer to handle very long lines
+	const maxCapacity = 1024 * 1024 // 1MB
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, maxCapacity)
+
 	wordCount := make(map[string]int)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		tokens := tokenizeLine(line)
+		if !utf8.ValidString(line) {
+			// Replace invalid UTF-8 runes
+			line = strings.ToValidUTF8(line, " ")
+		}
+
+		tokenizedLine := tokenizeLine(line, options)
+		if tokenizedLine == "" {
+			continue
+		}
+
+		tokens := strings.Fields(tokenizedLine)
 		for _, token := range tokens {
 			if token != "" {
 				wordCount[token]++
@@ -54,195 +125,167 @@ func StanfordTokenize(reader io.Reader, minFreq int) []WordFreq {
 	return result
 }
 
-// tokenizeLine tokenizes a single line according to Stanford Tokenizer rules
-func tokenizeLine(text string) []string {
-	if text == "" {
-		return []string{}
+// tokenizeLine tokenizes a single line with GloVe-optimized processing
+func tokenizeLine(line string, opt TokenizerOptions) string {
+	// Normalize unicode punctuation
+	line = normalizeUnicode(line)
+
+	// Replace URL/email with special tokens
+	line = replaceSpecials(line, opt)
+
+	// PTB-like contractions
+	line = splitContractions(line)
+
+	// Space punctuation without breaking decimals/hyphens
+	line = spacePunctuation(line, opt.KeepHyphens)
+
+	// Normalize digits
+	if opt.DigitsToZero {
+		line = digitsToZero(line)
 	}
 
-	// Preprocess text
-	text = preprocessText(text)
+	// Lowercase
+	line = toLowerIfNeeded(line, opt.Lowercase)
 
-	// Main patterns for tokenization
-	patterns := []struct {
-		pattern *regexp.Regexp
-		replace string
-	}{
-		// Separate sentence-ending punctuation
-		{regexp.MustCompile(`([.!?])(\s+|$)`), " $1 "},
+	// Collapse spaces
+	line = collapseSpaces(line)
+	return line
+}
 
-		// Separate commas, semicolons, colons
-		{regexp.MustCompile(`([,:;])`), " $1 "},
+// Basic unicode-like normalization for quotes/dashes/ellipsis (ASCII-safe)
+func normalizeUnicode(s string) string {
+	replacer := strings.NewReplacer(
+		// Double quotes
+		"\u201C", `"`, "\u201D", `"`, "\u201E", `"`, "\u00AB", `"`, "\u00BB", `"`,
+		// Single quotes -> ASCII apostrophe to preserve contractions
+		"\u2018", "'", "\u2019", "'", "\u201A", "'",
+		// Dashes
+		"\u2014", "--", "\u2013", "-", "\u2212", "-",
+		// Ellipsis
+		"\u2026", "...",
+	)
+	return replacer.Replace(s)
+}
 
-		// Separate opening brackets and quotes
-		{regexp.MustCompile(`([({\["'«])`), " $1 "},
-
-		// Separate closing brackets and quotes
-		{regexp.MustCompile(`([)}\]"'»])`), " $1 "},
-
-		// Handle contractions with apostrophe
-		{regexp.MustCompile(`(?i)\b(can)'t\b`), "$1 not"},
-		{regexp.MustCompile(`(?i)\b(won)'t\b`), "will not"},
-		{regexp.MustCompile(`(?i)\b(n)'t\b`), " not"},
-		{regexp.MustCompile(`(?i)\b('m)\b`), " am"},
-		{regexp.MustCompile(`(?i)\b('re)\b`), " are"},
-		{regexp.MustCompile(`(?i)\b('ve)\b`), " have"},
-		{regexp.MustCompile(`(?i)\b('ll)\b`), " will"},
-		{regexp.MustCompile(`(?i)\b('d)\b`), " would"},
-		{regexp.MustCompile(`(?i)\b('s)\b`), " 's"},
-
-		// Separate hyphens between words (except for compound words)
-		{regexp.MustCompile(`(\w)-(\w)`), "$1 - $2"},
-
-		// Separate ellipsis
-		{regexp.MustCompile(`\.{2,}`), " ... "},
-
-		// Separate dashes
-		{regexp.MustCompile(`--+`), " -- "},
-
-		// Percent signs and currency
-		{regexp.MustCompile(`([%$€£¥₽])`), " $1 "},
-
-		// Mathematical symbols
-		{regexp.MustCompile(`([+\-*/=<>])`), " $1 "},
-
-		// Ampersand
-		{regexp.MustCompile(`(&)`), " $1 "},
+func replaceSpecials(s string, opt TokenizerOptions) string {
+	if opt.ReplaceURLs {
+		s = reURL.ReplaceAllString(s, " <url> ")
 	}
-
-	for _, p := range patterns {
-		text = p.pattern.ReplaceAllString(text, p.replace)
+	if opt.ReplaceEmails {
+		s = reEmail.ReplaceAllString(s, " <email> ")
 	}
+	return s
+}
 
-	// Special handling for numbers with commas and dots
-	text = processNumbers(text)
-
-	// Split into tokens by spaces
-	tokens := strings.Fields(text)
-
-	// Postprocess tokens
-	var result []string
-	for _, token := range tokens {
-		token = strings.TrimSpace(token)
-		if token != "" {
-			// Additional processing for special cases
-			processedTokens := postprocessToken(token)
-			result = append(result, processedTokens...)
+// PTB-like contraction splitting without lemmatization
+func splitContractions(s string) string {
+	// Special cases to match PTB-ish tokens
+	s = reWonT.ReplaceAllStringFunc(s, func(m string) string {
+		// Preserve case of first letter, but produce tokens "wo n't"
+		if len(m) >= 1 && (m[0] == 'W' || m[0] == 'w') {
+			return "wo n't"
 		}
-	}
-
-	return result
+		return "wo n't"
+	})
+	s = reCanT.ReplaceAllStringFunc(s, func(m string) string {
+		// "can't" -> "ca n't"
+		return "ca n't"
+	})
+	s = reShanT.ReplaceAllStringFunc(s, func(m string) string {
+		// "shan't" -> "sha n't"
+		return "sha n't"
+	})
+	// General n't
+	s = reNt.ReplaceAllString(s, "${1} n't")
+	// 're 've 'll 'd 'm 's
+	s = reAposRe.ReplaceAllString(s, "${1} '$2")
+	return s
 }
 
-// preprocessText performs preliminary text processing
-func preprocessText(text string) string {
-	// Normalize spaces
-	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+// Space punctuation carefully; do not break decimals and hyphenated words
+func spacePunctuation(s string, keepHyphens bool) string {
+	// Space double dash as a token
+	s = reDoubleDash.ReplaceAllString(s, " -- ")
 
-	// Replace special Unicode characters with ASCII equivalents
-	replacements := map[string]string{
-		"“": "\"",
-		"”": "\"",
-		"‘": "'",
-		"’": "'",
-		"–": "-",
-		"—": "--",
-		"…": "...",
-	}
+	// Space selected punctuation
+	s = rePunctSpace.ReplaceAllString(s, " $1 ")
 
-	for old, new := range replacements {
-		text = strings.ReplaceAll(text, old, new)
-	}
+	// Apostrophe is handled by contractions; keep as-is here.
 
-	return text
-}
-
-// processNumbers handles numbers with separators
-func processNumbers(text string) string {
-	// Pattern for numbers with commas (1,000,000)
-	commaNumber := regexp.MustCompile(`\b(\d{1,3}(?:,\d{3})+)\b`)
-	text = commaNumber.ReplaceAllStringFunc(text, func(s string) string {
-		return strings.ReplaceAll(s, ",", "")
+	// Periods / question / exclamation at word boundaries
+	s = reTermPunct.ReplaceAllStringFunc(s, func(m string) string {
+		// Put a space before the punctuation and keep following whitespace if present
+		// Cases captured: either non-alnum before .!? or alnum before .!? followed by space/eol
+		// We'll normalize into " <punct> " and let trimming collapse spaces.
+		last := m[len(m)-1:]
+		if last == "." || last == "!" || last == "?" {
+			return strings.TrimSpace(m[:len(m)-1]) + " " + last + " "
+		}
+		return m
 	})
 
-	// Pattern for decimal numbers (3.14)
-	decimalNumber := regexp.MustCompile(`\b(\d+)\.(\d+)\b`)
-	text = decimalNumber.ReplaceAllString(text, "$1.$2")
+	// Ellipsis AFTER terminal punctuation processing to avoid interference
+	s = reEllipsis.ReplaceAllString(s, " ... ")
 
-	return text
+	// Commas: space them unless between digits (we will fix numbers afterwards anyway)
+	s = strings.ReplaceAll(s, ",", " , ")
+
+	// Handle single quotes that are not part of contractions
+	// This regex handles quotes that surround words (not contractions)
+	reQuotedWord := regexp.MustCompile(`(\W|^)'(\w+)'(\W|$)`)
+	s = reQuotedWord.ReplaceAllString(s, "$1 ' $2 ' $3")
+
+	// Hyphens: keep hyphenated tokens if keepHyphens=true
+	if keepHyphens {
+		// Do nothing for single '-' between word chars.
+		// But make sure standalone hyphens surrounded by spaces are spaced (already will be by user text).
+	} else {
+		// If not keeping hyphens, space them globally
+		s = strings.ReplaceAll(s, "-", " - ")
+	}
+
+	// Fix numeric patterns re-joining 1 , 234 and 3 . 14
+	s = reNumCommaFix.ReplaceAllString(s, "$1,$2")
+	s = reNumDotFix.ReplaceAllString(s, "$1.$2")
+
+	return s
 }
 
-// postprocessToken performs final processing of a single token
-func postprocessToken(token string) []string {
-	// Check if token is a URL or email
-	if isURL(token) || isEmail(token) {
-		return []string{token}
-	}
-
-	// Check for acronyms (U.S.A., Ph.D.)
-	if isAcronym(token) {
-		return []string{token}
-	}
-
-	// Handle possessive case
-	if strings.HasSuffix(token, "'s") || strings.HasSuffix(token, "'S") {
-		base := token[:len(token)-2]
-		if base != "" {
-			return []string{base, "'s"}
+func digitsToZero(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteByte('0')
+		} else {
+			b.WriteRune(r)
 		}
 	}
+	return b.String()
+}
 
-	// If token contains only punctuation, return as is
-	if isAllPunctuation(token) {
-		return []string{token}
+func toLowerIfNeeded(s string, lower bool) string {
+	if !lower {
+		return s
 	}
-
-	// Split glued words with punctuation at the ends
-	if len(token) > 1 {
-		firstRune := rune(token[0])
-		lastRune := rune(token[len(token)-1])
-
-		if unicode.IsPunct(firstRune) && !unicode.IsPunct(rune(token[1])) {
-			return []string{string(firstRune), token[1:]}
-		}
-
-		if unicode.IsPunct(lastRune) && !unicode.IsPunct(rune(token[len(token)-2])) {
-			return []string{token[:len(token)-1], string(lastRune)}
-		}
-	}
-
-	return []string{token}
+	return strings.ToLower(s)
 }
 
-// isURL checks if the token is a URL
-func isURL(token string) bool {
-	urlPattern := regexp.MustCompile(`^(https?|ftp)://[^\s/$.?#].[^\s]*$`)
-	return urlPattern.MatchString(token)
-}
-
-// isEmail checks if the token is an email
-func isEmail(token string) bool {
-	emailPattern := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-	return emailPattern.MatchString(token)
-}
-
-// isAcronym checks if the token is an acronym
-func isAcronym(token string) bool {
-	acronymPattern := regexp.MustCompile(`^([A-Z]\.)+[A-Z]?\.?$`)
-	return acronymPattern.MatchString(token)
-}
-
-// isAllPunctuation checks if the token consists only of punctuation
-func isAllPunctuation(token string) bool {
-	for _, r := range token {
-		if !unicode.IsPunct(r) && !unicode.IsSymbol(r) {
-			return false
+func collapseSpaces(s string) string {
+	// Replace any run of whitespace with a single space
+	space := false
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\t' || r == '\n' || r == '\r' || r == ' ' || r == '\v' || r == '\f' {
+			if !space {
+				b.WriteByte(' ')
+				space = true
+			}
+		} else {
+			b.WriteRune(r)
+			space = false
 		}
 	}
-	return true
-}
-
-// Helper function for convenient use with default parameters
-func Tokenize(reader io.Reader) []WordFreq {
-	return StanfordTokenize(reader, 5)
+	return strings.TrimSpace(b.String())
 }

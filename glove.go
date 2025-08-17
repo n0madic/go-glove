@@ -92,7 +92,7 @@ func (g *GloVe) BuildVocab(filename string) error {
 	defer f.Close()
 
 	// Count word frequencies (lowercased, whitespace tokenization)
-	wordFreq := StanfordTokenize(f, MIN_COUNT)
+	wordFreq := Tokenize(f, MIN_COUNT)
 
 	if len(wordFreq) > g.MaxVocabSize {
 		wordFreq = wordFreq[:g.MaxVocabSize]
@@ -154,7 +154,7 @@ func (g *GloVe) BuildCooccurrenceMatrix(filename string, windowSize int) error {
 
 		// Use the same tokenizer as BuildVocab for consistency
 		lineReader := strings.NewReader(line)
-		wordFreqs := StanfordTokenize(lineReader, 1)
+		wordFreqs := Tokenize(lineReader, 1)
 
 		// Extract just the words (ignore frequencies) and convert to indices
 		tokens := make([]string, len(wordFreqs))
