@@ -243,4 +243,17 @@ This implementation is compatible with the original Stanford GloVe:
 
 ## License
 
-MIT License
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Citation
+
+If you use this code in your research, please cite the original GloVe paper:
+
+```
+@inproceedings{pennington2014glove,
+  title={Glove: Global Vectors for Word Representation},
+  author={Jeffrey Pennington and Richard Socher and Christopher Manning},
+  booktitle={Empirical Methods in Natural Language Processing (EMNLP)},
+  year={2014}
+}
+```
