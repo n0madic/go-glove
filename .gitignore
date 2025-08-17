@@ -1,6 +1,7 @@
 *.txt
 *.gob
 *.bin
+*.tok
 evaluate/evaluate
 train/train
 CLAUDE.md

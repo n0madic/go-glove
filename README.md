@@ -33,6 +33,8 @@ package main
 
 import (
     "fmt"
+    "os"
+    "strings"
     "github.com/n0madic/go-glove"
 )
 
@@ -40,14 +42,35 @@ func main() {
     // Create a new GloVe model
     model := glove.NewGloVe()
 
-    // Build vocabulary from corpus
-    err := model.BuildVocab("corpus.txt")
+    // Option 1: Read and tokenize corpus
+    file, err := os.Open("corpus.txt")
+    if err != nil {
+        panic(err)
+    }
+    defer file.Close()
+
+    // Tokenize text with GloVe-optimized settings
+    wordFreqs := glove.Tokenize(file, 5) // min frequency = 5
+
+    // Convert to tokens (expand by frequency)
+    var tokens []string
+    for _, wf := range wordFreqs {
+        for i := 0; i < wf.Freq; i++ {
+            tokens = append(tokens, wf.Word)
+        }
+    }
+
+    // Option 2: Use pre-tokenized text
+    // tokens := strings.Fields("hello world hello world ...")
+
+    // Build vocabulary from tokens
+    err = model.BuildVocab(tokens)
     if err != nil {
         panic(err)
     }
 
     // Build co-occurrence matrix
-    err = model.BuildCooccurrenceMatrix("corpus.txt", 15) // window size = 15
+    err = model.BuildCooccurrenceMatrix(tokens, 15) // window size = 15
     if err != nil {
         panic(err)
     }
@@ -88,19 +111,25 @@ for i, word := range results {
 
 ## Command Line Usage
 
-### Training Example
+### Training Examples
 
-Build and run the training example:
+Build and run the training utilities:
 
 ```bash
-# Build the training binary
+# Build all utilities
 go build -o train ./train
+go build -o evaluate ./evaluate
+go build -o tokenize ./tokenize
 
-# Run training with default parameters
-./train
+# Train with pre-tokenized corpus (Stanford GloVe format)
+./train -corpus tokenized.txt -vector-size 200 -iterations 50
 
-# Run training with custom parameters
-./train -corpus my_corpus.txt -vector-size 200 -iterations 50 -window-size 15
+# Train with raw text and automatic tokenization
+./train -corpus raw_text.txt -tokenize -vector-size 200 -iterations 50
+
+# Tokenize text separately (recommended for large corpora)
+./tokenize -input raw_text.txt -output tokenized.txt
+./train -corpus tokenized.txt -vector-size 300
 
 # Save in binary format
 ./train -corpus data.txt -output-format binary
@@ -119,6 +148,7 @@ The training utility supports many command-line flags:
 
 Key parameters:
 - `-corpus`: Path to text corpus file (default: "corpus.txt")
+- `-tokenize`: Apply GloVe tokenization to raw text (default: false, expects pre-tokenized)
 - `-vector-size`: Vector dimensionality (default: 300)
 - `-window-size`: Context window size (default: 10)
 - `-iterations`: Number of training iterations (default: 100)
@@ -137,6 +167,49 @@ Key parameters:
 - `-examples`: Run example analogies after training
 - `-save-state`: Save model state for later continuation
 - `-load-state`: Load and continue training from saved state
+
+### Text Tokenization
+
+Use the tokenization utility to preprocess text corpora with GloVe-optimized settings:
+
+```bash
+# Build the tokenize binary
+go build -o tokenize ./tokenize
+
+# Basic tokenization (GloVe optimized: lowercase, digit normalization, etc.)
+./tokenize -input raw_text.txt -output tokenized.txt
+
+# Tokenize with custom options
+./tokenize -input corpus.txt -output tokens.txt -lowercase=false -digits-to-zero=false
+
+# Use in pipeline (stdin/stdout)
+cat large_corpus.txt | ./tokenize -input - -output - > tokenized.txt
+
+# Generate word frequency list instead of tokens
+./tokenize -input corpus.txt -show-freqs -min-freq 10 > vocab.txt
+
+# Show help for all options
+./tokenize -help
+```
+
+#### Tokenization Options
+
+- `-input`: Input text file (use "-" for stdin)
+- `-output`: Output file (use "-" for stdout, default: stdout)
+- `-lowercase`: Convert to lowercase (default: true)
+- `-digits-to-zero`: Normalize digits to 0 (default: true)
+- `-replace-urls`: Replace URLs with `<url>` token (default: true)
+- `-replace-emails`: Replace emails with `<email>` token (default: true)
+- `-keep-hyphens`: Keep hyphenated words intact (default: true)
+- `-min-freq`: Minimum word frequency (default: 1)
+- `-show-freqs`: Output word frequencies instead of tokens (default: false)
+
+The tokenizer applies GloVe-optimized preprocessing including:
+- PTB-style contraction splitting (e.g., "can't" → "ca n't")
+- Unicode normalization for quotes and dashes
+- URL and email replacement with special tokens
+- Digit normalization for better vocabulary compactness
+- Hyphen preservation for compound words
 
 ### Evaluating Trained Models
 
@@ -170,10 +243,17 @@ go build -o evaluate ./evaluate
 
 #### Training Pipeline
 ```go
-model.BuildVocab(filename string) error
-model.BuildCooccurrenceMatrix(filename string, windowSize int) error
+// Token-based API (recommended)
+tokens := []string{"hello", "world", "hello", "..."} // pre-tokenized text
+model.BuildVocab(tokens []string) error
+model.BuildCooccurrenceMatrix(tokens []string, windowSize int) error
 model.InitializeParameters(vectorSize int)
 model.Train(maxIter, numThreads int)
+
+// Tokenization (for preprocessing)
+import "strings"
+reader := strings.NewReader("Hello world! How are you?")
+wordFreqs := glove.Tokenize(reader, minFreq) // Returns []glove.WordFreq
 ```
 
 #### Vector Operations
@@ -220,6 +300,8 @@ Compatible with Stanford GloVe binary format for interoperability.
 - **Parallel training**: Configurable thread count
 - **Large corpora**: Handles multi-gigabyte text files
 - **No dependencies**: Uses only Go standard library
+- **Flexible preprocessing**: Separate tokenization allows corpus reuse and custom pipelines
+- **Stanford compatibility**: Can use existing tokenized corpora from Stanford GloVe
 
 ## Examples
 

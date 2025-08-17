@@ -4,12 +4,9 @@
 package glove
 
 import (
-	"bufio"
 	"math"
 	"math/rand"
-	"os"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -83,21 +80,38 @@ func NewGloVe() *GloVe {
 	}
 }
 
-// BuildVocab builds the vocabulary from a corpus
-func (g *GloVe) BuildVocab(filename string) error {
-	f, err := os.Open(filename)
-	if err != nil {
-		return err
+// BuildVocab builds the vocabulary from pre-tokenized text
+func (g *GloVe) BuildVocab(tokens []string) error {
+	// Count word frequencies
+	wordCount := make(map[string]int)
+	for _, token := range tokens {
+		if token != "" {
+			wordCount[token]++
+		}
 	}
-	defer f.Close()
 
-	// Count word frequencies (lowercased, whitespace tokenization)
-	wordFreq := Tokenize(f, MIN_COUNT)
+	// Filter by minimum frequency and create word frequency list
+	var wordFreq []WordFreq
+	for word, freq := range wordCount {
+		if freq >= MIN_COUNT {
+			wordFreq = append(wordFreq, WordFreq{Word: word, Freq: freq})
+		}
+	}
 
+	// Sort by descending frequency, then alphabetically
+	sort.Slice(wordFreq, func(i, j int) bool {
+		if wordFreq[i].Freq != wordFreq[j].Freq {
+			return wordFreq[i].Freq > wordFreq[j].Freq
+		}
+		return wordFreq[i].Word < wordFreq[j].Word
+	})
+
+	// Apply vocabulary size limit
 	if len(wordFreq) > g.MaxVocabSize {
 		wordFreq = wordFreq[:g.MaxVocabSize]
 	}
 
+	// Build vocabulary structures
 	g.VocabSize = len(wordFreq)
 	g.InvVocab = make([]string, g.VocabSize)
 	g.WordCount = make([]int, g.VocabSize)
@@ -133,64 +147,36 @@ func (g *GloVe) unpairKey(key uint64) (int, int) {
 	return int(key >> 32), int(key & 0xFFFFFFFF)
 }
 
-func (g *GloVe) BuildCooccurrenceMatrix(filename string, windowSize int) error {
-	f, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
+// BuildCooccurrenceMatrix builds the co-occurrence matrix from pre-tokenized text
+func (g *GloVe) BuildCooccurrenceMatrix(tokens []string, windowSize int) error {
 	coocMap := make(map[uint64]float64, 1<<20)
 
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		// Use the same tokenizer as BuildVocab for consistency
-		lineReader := strings.NewReader(line)
-		wordFreqs := Tokenize(lineReader, 1)
-
-		// Extract just the words (ignore frequencies) and convert to indices
-		tokens := make([]string, len(wordFreqs))
-		for i, wf := range wordFreqs {
-			tokens[i] = wf.Word
-		}
-
-		if len(tokens) == 0 {
-			continue
-		}
-		indices := indicesFromWords(tokens, g.Vocab)
-		for i := 0; i < len(indices); i++ {
-			left := i - windowSize
-			if left < 0 {
-				left = 0
-			}
-			for j := left; j < i; j++ {
-				idx1 := indices[i]
-				idx2 := indices[j]
-				dist := float64(i - j)
-				if dist <= 0 {
-					continue
-				}
-				// distance weighting 1/d as in the paper (Sec. 4.2)
-				w := 1.0 / dist
-
-				// one pass: add (i->j); if symmetric, also add (j->i)
-				coocMap[g.pairKey(idx1, idx2)] += w
-				if g.Symmetric {
-					coocMap[g.pairKey(idx2, idx1)] += w
-				}
-			}
-		}
+	if len(tokens) == 0 {
+		return nil
 	}
-	if err := scanner.Err(); err != nil {
-		return err
+
+	indices := indicesFromWords(tokens, g.Vocab)
+	for i := 0; i < len(indices); i++ {
+		left := i - windowSize
+		if left < 0 {
+			left = 0
+		}
+		for j := left; j < i; j++ {
+			idx1 := indices[i]
+			idx2 := indices[j]
+			dist := float64(i - j)
+			if dist <= 0 {
+				continue
+			}
+			// distance weighting 1/d as in the paper (Sec. 4.2)
+			w := 1.0 / dist
+
+			// one pass: add (i->j); if symmetric, also add (j->i)
+			coocMap[g.pairKey(idx1, idx2)] += w
+			if g.Symmetric {
+				coocMap[g.pairKey(idx2, idx1)] += w
+			}
+		}
 	}
 
 	g.Cooccur = make([]CoocEntry, 0, len(coocMap))

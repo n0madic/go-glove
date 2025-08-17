@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -45,7 +46,7 @@ func parseOutputFormat(format string) (glove.OutputFormat, error) {
 
 func main() {
 	var (
-		corpusFile     = flag.String("corpus", "corpus.txt", "Path to the text corpus file")
+		corpusFile     = flag.String("corpus", "corpus.txt", "Path to the text corpus file (whitespace-separated tokens)")
 		outputFile     = flag.String("output", "glove_vectors.txt", "Output file for trained vectors")
 		vectorSize     = flag.Int("vector-size", 300, "Vector dimensionality")
 		windowSize     = flag.Int("window-size", 10, "Context window size for co-occurrence matrix")
@@ -63,6 +64,7 @@ func main() {
 		saveMode       = flag.String("save-mode", "word-context", "Vector save mode: 'all-params', 'word-only', 'word-context', 'separate'")
 		outputFormat   = flag.String("output-format", "text", "Output format: 'text', 'binary', 'both'")
 		saveHeader     = flag.Bool("save-header", false, "Include header (vocab_size vector_size) in output file")
+		tokenize       = flag.Bool("tokenize", false, "Apply GloVe tokenization to input corpus (default: expect pre-tokenized)")
 		help           = flag.Bool("help", false, "Show usage information")
 	)
 
@@ -71,13 +73,18 @@ func main() {
 	if *help {
 		fmt.Printf("GloVe Training Utility\n\n")
 		fmt.Printf("Usage: %s [options]\n\n", os.Args[0])
-		fmt.Printf("This utility trains word embeddings using the GloVe algorithm.\n\n")
+		fmt.Printf("This utility trains word embeddings using the GloVe algorithm.\n")
+		fmt.Printf("By default, expects pre-tokenized corpus (whitespace-separated tokens).\n")
+		fmt.Printf("Use -tokenize flag to apply GloVe tokenization to raw text.\n\n")
 		fmt.Printf("Options:\n")
 		flag.PrintDefaults()
 		fmt.Printf("\nExamples:\n")
-		fmt.Printf("  %s -corpus text8.txt -vector-size 200 -iterations 50 -examples\n", os.Args[0])
-		fmt.Printf("  %s -corpus data.txt -save-mode word-only -output-format binary\n", os.Args[0])
-		fmt.Printf("  %s -corpus big.txt -save-header -output-format both\n", os.Args[0])
+		fmt.Printf("  # Train on pre-tokenized corpus (Stanford GloVe format)\n")
+		fmt.Printf("  %s -corpus tokenized.txt -vector-size 200 -iterations 50\n\n", os.Args[0])
+		fmt.Printf("  # Train on raw text with tokenization\n")
+		fmt.Printf("  %s -corpus raw_text.txt -tokenize -examples\n\n", os.Args[0])
+		fmt.Printf("  # Continue training from saved state\n")
+		fmt.Printf("  %s -load-state model.gob -iterations 50\n\n", os.Args[0])
 		fmt.Printf("\nSave Modes:\n")
 		fmt.Printf("  all-params  : Save all parameters including biases (W + W̃ + biases)\n")
 		fmt.Printf("  word-only   : Save word vectors only (W)\n")
@@ -131,6 +138,11 @@ func main() {
 		fmt.Printf("  Output file: %s\n", *outputFile)
 		fmt.Printf("  Save mode: %s\n", *saveMode)
 		fmt.Printf("  Output format: %s\n", *outputFormat)
+		if *tokenize {
+			fmt.Printf("  Tokenization: enabled (raw text)\n")
+		} else {
+			fmt.Printf("  Tokenization: disabled (pre-tokenized)\n")
+		}
 		if *saveHeader {
 			fmt.Printf("  Include header: yes\n")
 		}
@@ -139,16 +151,29 @@ func main() {
 		model = glove.NewGloVe()
 
 		if !*quiet {
+			if *tokenize {
+				fmt.Println("Reading and tokenizing corpus...")
+			} else {
+				fmt.Println("Reading pre-tokenized corpus...")
+			}
+		}
+		tokens, err := readCorpusTokens(*corpusFile, *tokenize)
+		if err != nil {
+			log.Fatalf("Failed to read corpus: %v", err)
+		}
+
+		if !*quiet {
+			fmt.Printf("Total tokens: %d\n", len(tokens))
 			fmt.Println("Building vocabulary...")
 		}
-		if err := model.BuildVocab(*corpusFile); err != nil {
+		if err := model.BuildVocab(tokens); err != nil {
 			log.Fatal(err)
 		}
 
 		if !*quiet {
 			fmt.Println("Building co-occurrence matrix...")
 		}
-		if err := model.BuildCooccurrenceMatrix(*corpusFile, *windowSize); err != nil {
+		if err := model.BuildCooccurrenceMatrix(tokens, *windowSize); err != nil {
 			log.Fatal(err)
 		}
 		if !*quiet {
@@ -194,6 +219,51 @@ func main() {
 
 	if *runExamples {
 		runExampleUsage(model, *similarityWord, *analogy, *topN, *topSimilar)
+	}
+}
+
+// readCorpusTokens reads a corpus file and returns tokens
+// If tokenize is true, applies GloVe tokenization to raw text
+// If tokenize is false, expects whitespace-separated tokens (Stanford GloVe format)
+func readCorpusTokens(filename string, tokenize bool) ([]string, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if tokenize {
+		// Apply GloVe tokenization to raw text
+		wordFreqs := glove.Tokenize(f, 1)
+		tokens := make([]string, 0)
+		for _, wf := range wordFreqs {
+			// Expand each word according to its frequency
+			for i := 0; i < wf.Freq; i++ {
+				tokens = append(tokens, wf.Word)
+			}
+		}
+		return tokens, nil
+	} else {
+		// Read pre-tokenized corpus (whitespace-separated tokens)
+		var tokens []string
+		scanner := bufio.NewScanner(f)
+		buf := make([]byte, 0, 1024*1024)
+		scanner.Buffer(buf, 1024*1024)
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			lineTokens := strings.Fields(line)
+			tokens = append(tokens, lineTokens...)
+		}
+
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
+
+		return tokens, nil
 	}
 }
 

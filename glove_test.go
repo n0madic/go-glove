@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,14 @@ func createTempFile(t testing.TB, content string) string {
 // Helper function to clean up temporary files
 func cleanupFile(filename string) {
 	os.Remove(filename)
+}
+
+// Helper function to convert corpus text to tokens (for new API)
+func corpusToTokens(corpus string) []string {
+	if corpus == "" {
+		return []string{}
+	}
+	return strings.Fields(corpus)
 }
 
 func TestNewGloVe(t *testing.T) {
@@ -89,10 +98,9 @@ func TestBuildVocab(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			model := NewGloVe()
-			filename := createTempFile(t, tt.corpus)
-			defer cleanupFile(filename)
+			tokens := corpusToTokens(tt.corpus)
 
-			err := model.BuildVocab(filename)
+			err := model.BuildVocab(tokens)
 			if err != nil {
 				t.Fatalf("BuildVocab() error = %v", err)
 			}
@@ -126,17 +134,16 @@ func TestBuildVocab(t *testing.T) {
 
 func TestBuildCooccurrenceMatrix(t *testing.T) {
 	model := NewGloVe()
-	filename := createTempFile(t, RichCorpus)
-	defer cleanupFile(filename)
+	tokens := corpusToTokens(RichCorpus)
 
 	// First build vocabulary
-	err := model.BuildVocab(filename)
+	err := model.BuildVocab(tokens)
 	if err != nil {
 		t.Fatalf("BuildVocab() error = %v", err)
 	}
 
 	// Then build co-occurrence matrix
-	err = model.BuildCooccurrenceMatrix(filename, 2)
+	err = model.BuildCooccurrenceMatrix(tokens, 2)
 	if err != nil {
 		t.Fatalf("BuildCooccurrenceMatrix() error = %v", err)
 	}
@@ -160,7 +167,7 @@ func TestBuildCooccurrenceMatrix(t *testing.T) {
 
 	// Test symmetric co-occurrence
 	model.Symmetric = true
-	err = model.BuildCooccurrenceMatrix(filename, 1)
+	err = model.BuildCooccurrenceMatrix(tokens, 1)
 	if err != nil {
 		t.Fatalf("BuildCooccurrenceMatrix() symmetric error = %v", err)
 	}
@@ -401,16 +408,15 @@ func TestWordAnalogy(t *testing.T) {
 func TestTrain(t *testing.T) {
 	// Create a small test model
 	model := NewGloVe()
-	filename := createTempFile(t, RichCorpus)
-	defer cleanupFile(filename)
+	tokens := corpusToTokens(RichCorpus)
 
 	// Build vocab and co-occurrence matrix
-	err := model.BuildVocab(filename)
+	err := model.BuildVocab(tokens)
 	if err != nil {
 		t.Fatalf("BuildVocab() error = %v", err)
 	}
 
-	err = model.BuildCooccurrenceMatrix(filename, 2)
+	err = model.BuildCooccurrenceMatrix(tokens, 2)
 	if err != nil {
 		t.Fatalf("BuildCooccurrenceMatrix() error = %v", err)
 	}
@@ -688,13 +694,12 @@ func BenchmarkBuildVocab(b *testing.B) {
 	corpus := "the quick brown fox jumps over the lazy dog " +
 		"the quick brown fox jumps over the lazy dog " +
 		"the quick brown fox jumps over the lazy dog"
-	filename := createTempFile(b, corpus)
-	defer cleanupFile(filename)
+	tokens := corpusToTokens(corpus)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		model := NewGloVe()
-		model.BuildVocab(filename)
+		model.BuildVocab(tokens)
 	}
 }
 
@@ -702,25 +707,23 @@ func BenchmarkBuildCooccurrenceMatrix(b *testing.B) {
 	corpus := "the quick brown fox jumps over the lazy dog " +
 		"the quick brown fox jumps over the lazy dog " +
 		"the quick brown fox jumps over the lazy dog"
-	filename := createTempFile(b, corpus)
-	defer cleanupFile(filename)
+	tokens := corpusToTokens(corpus)
 
 	model := NewGloVe()
-	model.BuildVocab(filename)
+	model.BuildVocab(tokens)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		model.BuildCooccurrenceMatrix(filename, 5)
+		model.BuildCooccurrenceMatrix(tokens, 5)
 	}
 }
 
 func BenchmarkTrain(b *testing.B) {
 	model := NewGloVe()
-	filename := createTempFile(b, RichCorpus+" "+RichCorpus)
-	defer cleanupFile(filename)
+	tokens := corpusToTokens(RichCorpus + " " + RichCorpus)
 
-	model.BuildVocab(filename)
-	model.BuildCooccurrenceMatrix(filename, 3)
+	model.BuildVocab(tokens)
+	model.BuildCooccurrenceMatrix(tokens, 3)
 	model.InitializeParameters(100)
 
 	b.ResetTimer()
